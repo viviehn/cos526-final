@@ -1,6 +1,6 @@
 import os
 os.environ['TF_FORCE_GPU_ALLOW_GROWTH'] = 'true'
-os.environ['CUDA_VISIBLE_DEVICES'] ='2'
+os.environ['CUDA_VISIBLE_DEVICES'] ='1'
 
 import sys
 import tensorflow as tf
@@ -423,7 +423,7 @@ def create_nerf(args):
     }
 
     # NDC only good for LLFF-style forward facing data
-    if args.dataset_type != 'llff' or args.no_ndc:
+    if (args.dataset_type != 'llff' and args.dataset_type != 'meta') or args.no_ndc:
         print('Not ndc!')
         render_kwargs_train['ndc'] = False
         render_kwargs_train['lindisp'] = args.lindisp
@@ -577,19 +577,88 @@ def train():
 
     parser = config_parser()
     args = parser.parse_args()
-    
+
     if args.random_seed is not None:
         print('Fixing random seed', args.random_seed)
         np.random.seed(args.random_seed)
         tf.compat.v1.set_random_seed(args.random_seed)
 
     # Load data
+    if args.dataset_type == 'meta':
+        data_dirs = ['../LLFF/5436','../LLFF/5438', '../LLFF/6160','../LLFF/6502',
+                     '../LLFF/6564','../LLFF/6704']
+        images = None
+        poses = None
+        bds = None
+        hwf = None
+        render_poses = None
 
-    if args.dataset_type == 'llff':
-        images, poses, bds, render_poses, i_test = load_llff_data(args.datadir, args.factor,
+        for data_dir in data_dirs:
+            images0, poses0, bds0, render_poses0, i_test0 = load_llff_data(data_dir, args.factor,
+                                                                      recenter=True, bd_factor=.75,
+                                                                      spherify=args.spherify) 
+            hwf0 = poses0[0, :3, -1]
+            poses0 = poses0[:, :3, :4]
+            if images is None:
+                images = images0
+                poses = poses0
+                hwf = hwf0
+                bds = bds0
+                render_poses = render_poses0
+            else:
+                images = np.concatenate((images,images0),axis=0)
+                poses = np.concatenate((poses,poses0),axis=0)
+                bds = np.concatenate((bds,bds0),axis=0)
+                hwf = np.concatenate((hwf,hwf0),axis=0)
+                render_poses = np.concatenate((render_poses,render_poses0),axis=0)
+
+        data_dir = '../LLFF/5961'
+
+        images0, poses0, bds0, render_poses0, i_test0 = load_llff_data(data_dir, args.factor,
                                                                   recenter=True, bd_factor=.75,
                                                                   spherify=args.spherify)
-        hwf = poses[0, :3, -1]
+        hwf0 = poses0[0, :3, -1]
+        poses0 = poses0[:, :3, :4]
+
+        i_train = list(range(0, len(images)))
+        i_5961 = list(range(len(images),len(images)+len(images0)))
+
+        images = np.concatenate((images,images0),axis=0)
+        poses = np.concatenate((poses,poses0),axis=0)
+        bds = np.concatenate((bds,bds0),axis=0)
+        hwf = np.concatenate((hwf,hwf0),axis=0)
+        render_poses = np.concatenate((render_poses,render_poses0),axis=0)
+
+        data_dir = '../LLFF/6581'
+
+        images0, poses0, bds0, render_poses0, i_test0 = load_llff_data(data_dir, args.factor,
+                                                                  recenter=True, bd_factor=.75,
+                                                                  spherify=args.spherify)
+        hwf0 = poses0[0, :3, -1]
+        poses0 = poses0[:, :3, :4]
+
+        i_6581= list(range(len(images),len(images)+len(images0)))
+
+        images = np.concatenate((images,images0),axis=0)
+        poses = np.concatenate((poses,poses0),axis=0)
+        bds = np.concatenate((bds,bds0),axis=0)
+        hwf = np.concatenate((hwf,hwf0),axis=0)
+        print(hwf)
+        hwf = hwf[0:3]
+        render_poses = np.concatenate((render_poses,render_poses0),axis=0)
+
+        print('DEFINING BOUNDS')
+        if args.no_ndc:
+            near = tf.reduce_min(bds) * .9
+            far = tf.reduce_max(bds) * 1.
+        else:
+            near = 0.
+            far = 1.
+        print('NEAR FAR', near, far)
+    elif args.dataset_type == 'llff':
+        images, poses, bds, render_poses, i_test, indices = load_llff_data(args.datadir, args.factor,
+                                                                  recenter=True, bd_factor=.75,
+                                                                  spherify=args.spherify, meta=True)
         poses = poses[:, :3, :4]
         print('Loaded llff', images.shape,
               render_poses.shape, hwf, args.datadir)
@@ -600,9 +669,10 @@ def train():
             print('Auto LLFF holdout,', args.llffhold)
             i_test = np.arange(images.shape[0])[::args.llffhold]
 
-        i_val = i_test
-        i_train = np.array([i for i in np.arange(int(images.shape[0])) if
-                            (i not in i_test and i not in i_val)])
+        i_train = indices[0]
+        i_5961 = indices[1]
+        i_6581 = indices[2]
+        print(indices)
 
         print('DEFINING BOUNDS')
         if args.no_ndc:
@@ -612,35 +682,6 @@ def train():
             near = 0.
             far = 1.
         print('NEAR FAR', near, far)
-
-    elif args.dataset_type == 'blender':
-        images, poses, render_poses, hwf, i_split = load_blender_data(
-            args.datadir, args.half_res, args.testskip)
-        print('Loaded blender', images.shape,
-              render_poses.shape, hwf, args.datadir)
-        i_train, i_val, i_test = i_split
-
-        near = 2.
-        far = 6.
-
-        if args.white_bkgd:
-            images = images[..., :3]*images[..., -1:] + (1.-images[..., -1:])
-        else:
-            images = images[..., :3]
-
-    elif args.dataset_type == 'deepvoxels':
-
-        images, poses, render_poses, hwf, i_split = load_dv_data(scene=args.shape,
-                                                                 basedir=args.datadir,
-                                                                 testskip=args.testskip)
-
-        print('Loaded deepvoxels', images.shape,
-              render_poses.shape, hwf, args.datadir)
-        i_train, i_val, i_test = i_split
-
-        hemi_R = np.mean(np.linalg.norm(poses[:, :3, -1], axis=-1))
-        near = hemi_R-1.
-        far = hemi_R+1.
 
     else:
         print('Unknown dataset type', args.dataset_type, 'exiting')
@@ -746,184 +787,268 @@ def train():
 
     N_iters = 1000000
     print('Begin')
-    print('TRAIN views are', i_train)
-    print('TEST views are', i_test)
-    print('VAL views are', i_val)
+    print('meta-TRAIN views are', i_train)
+    print('meta-TEST views are', i_5961)
+    print('meta-TEST views are', i_6581)
 
     # Summary writers
     writer = tf.contrib.summary.create_file_writer(
         os.path.join(basedir, 'summaries', expname))
     writer.set_as_default()
 
-    for i in range(start, N_iters):
-        time0 = time.time()
+    # shuffle training images
+    np.random.shuffle(i_train)
 
-        # Sample random ray batch
 
-        if use_batching:
-            # Random over all images
-            batch = rays_rgb[i_batch:i_batch+N_rand]  # [B, 2+1, 3*?]
-            batch = tf.transpose(batch, [1, 0, 2])
-
-            # batch_rays[i, n, xyz] = ray origin or direction, example_id, 3D position
-            # target_s[n, rgb] = example_id, observed color.
-            batch_rays, target_s = batch[:2], batch[2]
-
-            i_batch += N_rand
-            if i_batch >= rays_rgb.shape[0]:
-                np.random.shuffle(rays_rgb)
-                i_batch = 0
-
-        else:
+    for epoch in range(1000):
+        for i, img_i in enumerate(i_train):
+            time0 = time.time()
             # Random from one image
-            img_i = np.random.choice(i_train)
             target = images[img_i]
             pose = poses[img_i, :3, :4]
 
-            if N_rand is not None:
-                rays_o, rays_d = get_rays(H, W, focal, pose)
-                if i < args.precrop_iters:
-                    dH = int(H//2 * args.precrop_frac)
-                    dW = int(W//2 * args.precrop_frac)
-                    coords = tf.stack(tf.meshgrid(
-                        tf.range(H//2 - dH, H//2 + dH), 
-                        tf.range(W//2 - dW, W//2 + dW), 
-                        indexing='ij'), -1)
-                    if i < 10:
-                        print('precrop', dH, dW, coords[0,0], coords[-1,-1])
-                else:
-                    coords = tf.stack(tf.meshgrid(
-                        tf.range(H), tf.range(W), indexing='ij'), -1)
-                coords = tf.reshape(coords, [-1, 2])
-                select_inds = np.random.choice(
-                    coords.shape[0], size=[N_rand], replace=False)
-                select_inds = tf.gather_nd(coords, select_inds[:, tf.newaxis])
-                rays_o = tf.gather_nd(rays_o, select_inds)
-                rays_d = tf.gather_nd(rays_d, select_inds)
-                batch_rays = tf.stack([rays_o, rays_d], 0)
-                target_s = tf.gather_nd(target, select_inds)
+            # save current grad vars
+            coarse_weights = models['model'].get_weights()
+            fine_weights = models['model_fine'].get_weights()
 
-        #####  Core optimization loop  #####
+            # inner loop
+            for in_t in range(32):
+                if N_rand is not None:
+                    rays_o, rays_d = get_rays(H, W, focal, pose)
+                    if i < args.precrop_iters:
+                        dH = int(H//2 * args.precrop_frac)
+                        dW = int(W//2 * args.precrop_frac)
+                        coords = tf.stack(tf.meshgrid(
+                            tf.range(H//2 - dH, H//2 + dH), 
+                            tf.range(W//2 - dW, W//2 + dW), 
+                            indexing='ij'), -1)
+                        if i < 10:
+                            print('precrop', dH, dW, coords[0,0], coords[-1,-1])
+                    else:
+                        coords = tf.stack(tf.meshgrid(
+                            tf.range(H), tf.range(W), indexing='ij'), -1)
+                    coords = tf.reshape(coords, [-1, 2])
+                    select_inds = np.random.choice(
+                        coords.shape[0], size=[N_rand], replace=False)
+                    select_inds = tf.gather_nd(coords, select_inds[:, tf.newaxis])
+                    rays_o = tf.gather_nd(rays_o, select_inds)
+                    rays_d = tf.gather_nd(rays_d, select_inds)
+                    batch_rays = tf.stack([rays_o, rays_d], 0)
+                    target_s = tf.gather_nd(target, select_inds)
 
-        with tf.GradientTape() as tape:
+                #####  Core optimization loop  #####
 
-            # Make predictions for color, disparity, accumulated opacity.
-            rgb, disp, acc, extras = render(
-                H, W, focal, chunk=args.chunk, rays=batch_rays,
-                verbose=i < 10, retraw=True, **render_kwargs_train)
+                with tf.GradientTape() as tape:
 
-            # Compute MSE loss between predicted and true RGB.
-            img_loss = img2mse(rgb, target_s)
-            trans = extras['raw'][..., -1]
-            loss = img_loss
-            psnr = mse2psnr(img_loss)
+                    # Make predictions for color, disparity, accumulated opacity.
+                    rgb, disp, acc, extras = render(
+                        H, W, focal, chunk=args.chunk, rays=batch_rays,
+                        verbose=i < 10, retraw=True, **render_kwargs_train)
 
-            # Add MSE loss for coarse-grained model
-            if 'rgb0' in extras:
-                img_loss0 = img2mse(extras['rgb0'], target_s)
-                loss += img_loss0
-                psnr0 = mse2psnr(img_loss0)
+                    # Compute MSE loss between predicted and true RGB.
+                    img_loss = img2mse(rgb, target_s)
+                    trans = extras['raw'][..., -1]
+                    loss = img_loss
+                    psnr = mse2psnr(img_loss)
 
-        gradients = tape.gradient(loss, grad_vars)
-        optimizer.apply_gradients(zip(gradients, grad_vars))
+                    # Add MSE loss for coarse-grained model
+                    if 'rgb0' in extras:
+                        img_loss0 = img2mse(extras['rgb0'], target_s)
+                        loss += img_loss0
+                        psnr0 = mse2psnr(img_loss0)
 
-        dt = time.time()-time0
+                grad_vars = models['model'].trainable_variables + models['model_fine'].trainable_variables
+                gradients = tape.gradient(loss, grad_vars)
+                optimizer.apply_gradients(zip(gradients, grad_vars))
+                global_step.assign_add(1)
 
-        #####           end            #####
+            new_weights = models['model'].get_weights()
+            for var in range(len(new_weights)):
+                new_weights[var] = coarse_weights[var] + (
+                    (new_weights[var] - coarse_weights[var]) * ((1 - epoch/1000) * .25)
+                )
+            models['model'].set_weights(new_weights)
 
-        # Rest is logging
+            new_weights = models['model_fine'].get_weights()
+            for var in range(len(new_weights)):
+                new_weights[var] = fine_weights[var] + (
+                    (new_weights[var] - fine_weights[var]) * ((1 - epoch/1000) * .25)
+                )
+            models['model_fine'].set_weights(new_weights)
 
-        def save_weights(net, prefix, i):
-            path = os.path.join(
-                basedir, expname, '{}_{:06d}.npy'.format(prefix, i))
-            np.save(path, net.get_weights())
-            print('saved weights at', path)
+            # weights have bemodel_fineen updated, use them to update old weights
 
-        if i % args.i_weights == 0:
-            for k in models:
-                save_weights(models[k], k, i)
+            dt = time.time()-time0
 
-        if i % args.i_video == 0 and i > 0:
+            #####           end            #####
+            # Rest is logging
 
-            rgbs, disps = render_path(
-                render_poses, hwf, args.chunk, render_kwargs_test)
-            print('Done, saving', rgbs.shape, disps.shape)
-            moviebase = os.path.join(
-                basedir, expname, '{}_spiral_{:06d}_'.format(expname, i))
-            imageio.mimwrite(moviebase + 'rgb.mp4',
-                             to8b(rgbs), fps=30, quality=8)
-            imageio.mimwrite(moviebase + 'disp.mp4',
-                             to8b(disps / np.max(disps)), fps=30, quality=8)
+            # these weights would be initialization weights
 
-            if args.use_viewdirs:
-                render_kwargs_test['c2w_staticcam'] = render_poses[0][:3, :4]
-                rgbs_still, _ = render_path(
-                    render_poses, hwf, args.chunk, render_kwargs_test)
-                render_kwargs_test['c2w_staticcam'] = None
-                imageio.mimwrite(moviebase + 'rgb_still.mp4',
-                                 to8b(rgbs_still), fps=30, quality=8)
+            def save_weights(net, prefix, i):
+                path = os.path.join(
+                    basedir, expname, '{}_{}_{:06d}.npy'.format(prefix, epoch, i))
+                np.save(path, net.get_weights())
+                print('saved weights at', path)
 
-        if i % args.i_testset == 0 and i > 0:
-            testsavedir = os.path.join(
-                basedir, expname, 'testset_{:06d}'.format(i))
-            os.makedirs(testsavedir, exist_ok=True)
-            print('test poses shape', poses[i_test].shape)
-            render_path(poses[i_test], hwf, args.chunk, render_kwargs_test,
-                        gt_imgs=images[i_test], savedir=testsavedir)
-            print('Saved test set')
+            if i % args.i_weights == 0:
+                for k in models:
+                    save_weights(models[k], k, i)
 
-        if i % args.i_print == 0 or i < 10:
+            if i % args.i_video == 0 and i > 0:
 
-            print(expname, i, psnr.numpy(), loss.numpy(), global_step.numpy())
-            print('iter time {:.05f}'.format(dt))
-            with tf.contrib.summary.record_summaries_every_n_global_steps(args.i_print):
-                tf.contrib.summary.scalar('loss', loss)
-                tf.contrib.summary.scalar('psnr', psnr)
-                tf.contrib.summary.histogram('tran', trans)
-                if args.N_importance > 0:
-                    tf.contrib.summary.scalar('psnr0', psnr0)
+                # test time optimizatiion
+                coarse_weights = models['model'].get_weights()
+                fine_weights = models['model_fine'].get_weights()
 
-            if i % args.i_img == 0:
+                for dset_name, i_test in zip(['5961', '6581'],[i_5961, i_6581]):
+                    # save current grad vars
 
-                # Log a rendered validation view to Tensorboard
-                img_i = np.random.choice(i_val)
-                target = images[img_i]
-                pose = poses[img_i, :3, :4]
+                    models['model'].set_weights(coarse_weights)
+                    models['model_fine'].set_weights(fine_weights)
+                    tt_optimizer = tf.keras.optimizers.SGD(0.5)
 
-                rgb, disp, acc, extras = render(H, W, focal, chunk=args.chunk, c2w=pose,
-                                                **render_kwargs_test)
 
-                psnr = mse2psnr(img2mse(rgb, target))
-                
-                # Save out the validation image for Tensorboard-free monitoring
-                testimgdir = os.path.join(basedir, expname, 'tboard_val_imgs')
-                if i==0:
-                    os.makedirs(testimgdir, exist_ok=True)
-                imageio.imwrite(os.path.join(testimgdir, '{:06d}.png'.format(i)), to8b(rgb))
+                    # inner loop
+                    for in_t in range(1000):
+                        img_i = np.random.choice(i_test)
+                        time0 = time.time()
+                        # Random from one image
+                        target = images[img_i]
+                        pose = poses[img_i, :3, :4]
 
-                with tf.contrib.summary.record_summaries_every_n_global_steps(args.i_img):
+                        if N_rand is not None:
+                            rays_o, rays_d = get_rays(H, W, focal, pose)
+                            if i < args.precrop_iters:
+                                dH = int(H//2 * args.precrop_frac)
+                                dW = int(W//2 * args.precrop_frac)
+                                coords = tf.stack(tf.meshgrid(
+                                    tf.range(H//2 - dH, H//2 + dH), 
+                                    tf.range(W//2 - dW, W//2 + dW), 
+                                    indexing='ij'), -1)
+                                if i < 10:
+                                    print('precrop', dH, dW, coords[0,0], coords[-1,-1])
+                            else:
+                                coords = tf.stack(tf.meshgrid(
+                                    tf.range(H), tf.range(W), indexing='ij'), -1)
+                            coords = tf.reshape(coords, [-1, 2])
+                            select_inds = np.random.choice(
+                                coords.shape[0], size=[N_rand], replace=False)
+                            select_inds = tf.gather_nd(coords, select_inds[:, tf.newaxis])
+                            rays_o = tf.gather_nd(rays_o, select_inds)
+                            rays_d = tf.gather_nd(rays_d, select_inds)
+                            batch_rays = tf.stack([rays_o, rays_d], 0)
+                            target_s = tf.gather_nd(target, select_inds)
 
-                    tf.contrib.summary.image('rgb', to8b(rgb)[tf.newaxis])
-                    tf.contrib.summary.image(
-                        'disp', disp[tf.newaxis, ..., tf.newaxis])
-                    tf.contrib.summary.image(
-                        'acc', acc[tf.newaxis, ..., tf.newaxis])
+                        #####  Core optimization loop  #####
 
-                    tf.contrib.summary.scalar('psnr_holdout', psnr)
-                    tf.contrib.summary.image('rgb_holdout', target[tf.newaxis])
+                        with tf.GradientTape() as tape:
 
-                if args.N_importance > 0:
+                            # Make predictions for color, disparity, accumulated opacity.
+                            rgb, disp, acc, extras = render(
+                                H, W, focal, chunk=args.chunk, rays=batch_rays,
+                                verbose=i < 10, retraw=True, **render_kwargs_train)
+
+                            # Compute MSE loss between predicted and true RGB.
+                            img_loss = img2mse(rgb, target_s)
+                            trans = extras['raw'][..., -1]
+                            loss = img_loss
+                            psnr = mse2psnr(img_loss)
+
+                            # Add MSE loss for coarse-grained model
+                            if 'rgb0' in extras:
+                                img_loss0 = img2mse(extras['rgb0'], target_s)
+                                loss += img_loss0
+                                psnr0 = mse2psnr(img_loss0)
+
+                        grad_vars = models['model'].trainable_variables + models['model_fine'].trainable_variables
+                        gradients = tape.gradient(loss, grad_vars)
+                        tt_optimizer.apply_gradients(zip(gradients, grad_vars))
+                        #global_step.assign_add(1)
+
+                    rgbs, disps = render_path(
+                        render_poses[i_test], hwf, args.chunk, render_kwargs_test)
+                    print('Done, saving', rgbs.shape, disps.shape)
+                    moviebase = os.path.join(
+                            basedir, expname, '{}_spiral_{}_{:03d}_{:06d}_'.format(expname, dset_name, epoch, i))
+                    imageio.mimwrite(moviebase + 'rgb.mp4',
+                                     to8b(rgbs), fps=30, quality=8)
+                    imageio.mimwrite(moviebase + 'disp.mp4',
+                                     to8b(disps / np.max(disps)), fps=30, quality=8)
+
+                    '''
+                    if args.use_viewdirs:
+                        render_kwargs_test['c2w_staticcam'] = render_poses[0][:3, :4]
+                        rgbs_still, _ = render_path(
+                            render_poses, hwf, args.chunk, render_kwargs_test)
+                        render_kwargs_test['c2w_staticcam'] = None
+                        imageio.mimwrite(moviebase + 'rgb_still.mp4',
+                                         to8b(rgbs_still), fps=30, quality=8)
+
+                    testsavedir = os.path.join(
+                        basedir, expname, 'testset_{:06d}'.format(i))
+                    os.makedirs(testsavedir, exist_ok=True)
+                    print('test poses shape', poses[i_test].shape)
+                    render_path(poses[i_test], hwf, args.chunk, render_kwargs_test,
+                                gt_imgs=images[i_test], savedir=testsavedir)
+                    print('Saved test set')
+                    '''
+
+            if i % args.i_print == 0 or i < 10:
+
+                print(expname, i, psnr.numpy(), loss.numpy(), global_step.numpy())
+                print('iter time {:.05f}'.format(dt))
+                with tf.contrib.summary.record_summaries_every_n_global_steps(args.i_print):
+                    tf.contrib.summary.scalar('loss', loss)
+                    tf.contrib.summary.scalar('psnr', psnr)
+                    tf.contrib.summary.histogram('tran', trans)
+                    if args.N_importance > 0:
+                        tf.contrib.summary.scalar('psnr0', psnr0)
+
+                if i % args.i_img == 0:
+
+                    # Log a rendered validation view to Tensorboard
+                    img_i = np.random.choice(i_6581)
+                    target = images[img_i]
+                    pose = poses[img_i, :3, :4]
+
+                    rgb, disp, acc, extras = render(H, W, focal, chunk=args.chunk, c2w=pose,
+                                                    **render_kwargs_test)
+
+                    psnr = mse2psnr(img2mse(rgb, target))
+                    
+                    # Save out the validation image for Tensorboard-free monitoring
+                    testimgdir = os.path.join(basedir, expname, 'tboard_val_imgs')
+                    if i==0:
+                        os.makedirs(testimgdir, exist_ok=True)
+                    imageio.imwrite(os.path.join(testimgdir, '{:03d}_{:06d}.png'.format(epoch, i)), to8b(rgb))
 
                     with tf.contrib.summary.record_summaries_every_n_global_steps(args.i_img):
-                        tf.contrib.summary.image(
-                            'rgb0', to8b(extras['rgb0'])[tf.newaxis])
-                        tf.contrib.summary.image(
-                            'disp0', extras['disp0'][tf.newaxis, ..., tf.newaxis])
-                        tf.contrib.summary.image(
-                            'z_std', extras['z_std'][tf.newaxis, ..., tf.newaxis])
 
-        global_step.assign_add(1)
+                        tf.contrib.summary.image('rgb', to8b(rgb)[tf.newaxis])
+                        tf.contrib.summary.image(
+                            'disp', disp[tf.newaxis, ..., tf.newaxis])
+                        tf.contrib.summary.image(
+                            'acc', acc[tf.newaxis, ..., tf.newaxis])
+
+                        tf.contrib.summary.scalar('psnr_holdout', psnr)
+                        tf.contrib.summary.image('rgb_holdout', target[tf.newaxis])
+
+                    if args.N_importance > 0:
+
+                        with tf.contrib.summary.record_summaries_every_n_global_steps(args.i_img):
+                            tf.contrib.summary.image(
+                                'rgb0', to8b(extras['rgb0'])[tf.newaxis])
+                            tf.contrib.summary.image(
+                                'disp0', extras['disp0'][tf.newaxis, ..., tf.newaxis])
+                            tf.contrib.summary.image(
+                                'z_std', extras['z_std'][tf.newaxis, ..., tf.newaxis])
+
+                models['model'].set_weights(coarse_weights)
+                models['model_fine'].set_weights(fine_weights)
+
 
 
 if __name__ == '__main__':
     train()
+

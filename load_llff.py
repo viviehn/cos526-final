@@ -1,5 +1,6 @@
 import numpy as np
 import os, imageio
+import glob
 
 
 ########## Slightly modified version of LLFF data loading code 
@@ -65,8 +66,9 @@ def _load_data(basedir, factor=None, width=None, height=None, load_imgs=True):
     poses = poses_arr[:, :-2].reshape([-1, 3, 5]).transpose([1,2,0])
     bds = poses_arr[:, -2:].transpose([1,0])
     
-    img0 = [os.path.join(basedir, 'images', f) for f in sorted(os.listdir(os.path.join(basedir, 'images'))) \
-            if f.endswith('JPG') or f.endswith('jpg') or f.endswith('png')][0]
+    paths = [os.path.join(basedir, 'images', f) for f in sorted(os.listdir(os.path.join(basedir, 'images'))) \
+            if f.endswith('JPG') or f.endswith('jpg') or f.endswith('png')]
+    img0 = paths[0]
     sh = imageio.imread(img0).shape
     
     sfx = ''
@@ -112,10 +114,12 @@ def _load_data(basedir, factor=None, width=None, height=None, load_imgs=True):
             return imageio.imread(f)
         
     imgs = imgs = [imread(f)[...,:3]/255. for f in imgfiles]
+    for img in imgs:
+        print(img.shape)
     imgs = np.stack(imgs, -1)  
     
     print('Loaded image data', imgs.shape, poses[:,-1,0])
-    return poses, bds, imgs
+    return poses, bds, imgs, paths
 
     
             
@@ -240,10 +244,10 @@ def spherify_poses(poses, bds):
     return poses_reset, new_poses, bds
     
 
-def load_llff_data(basedir, factor=8, recenter=True, bd_factor=.75, spherify=False, path_zflat=False):
+def load_llff_data(basedir, factor=8, recenter=True, bd_factor=.75, spherify=False, path_zflat=False, meta=False):
     
 
-    poses, bds, imgs = _load_data(basedir, factor=factor) # factor=8 downsamples original imgs by 8x
+    poses, bds, imgs, paths = _load_data(basedir, factor=factor) # factor=8 downsamples original imgs by 8x
     print('Loaded', basedir, bds.min(), bds.max())
     
     # Correct rotation matrix ordering and move variable dim to axis 0
@@ -286,7 +290,7 @@ def load_llff_data(basedir, factor=8, recenter=True, bd_factor=.75, spherify=Fal
         tt = poses[:,:3,3] # ptstocam(poses[:3,3,:].T, c2w).T
         rads = np.percentile(np.abs(tt), 90, 0)
         c2w_path = c2w
-        N_views = 120
+        N_views = 60
         N_rots = 2
         if path_zflat:
 #             zloc = np.percentile(tt, 10, 0)[2]
@@ -312,6 +316,18 @@ def load_llff_data(basedir, factor=8, recenter=True, bd_factor=.75, spherify=Fal
     
     images = images.astype(np.float32)
     poses = poses.astype(np.float32)
+
+    if meta:
+        only_5961 = [os.path.basename(f) for f in glob.glob(f'{basedir}/../5961/images/*.png')]
+        only_6581 = [os.path.basename(f) for f in glob.glob(f'{basedir}/../6581/images/*.png')]
+        print(only_5961)
+        print(only_6581)
+        print(paths)
+        train_idx = [i for i in range(len(paths)) if os.path.basename(paths[i]) not in only_5961 and os.path.basename(paths[i]) not in only_6581]
+        only_5961_idx = [i for i in range(len(paths)) if os.path.basename(paths[i]) in only_5961]
+        only_6581_idx = [i for i in range(len(paths)) if os.path.basename(paths[i]) in only_6581]
+        indices = (train_idx, only_5961_idx, only_6581_idx)
+        return images, poses, bds, render_poses, i_test, indices
 
     return images, poses, bds, render_poses, i_test
 
